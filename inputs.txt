@@ -1,0 +1,3 @@
+Acme Ltd is a B2B SaaS company that builds workflow automation tools for logistics teams. Their platform helps mid-sized enterprises reduce manual admin work by 40%. They primarily serve companies in the UK and Europe. Key features include analytics dashboards, AI-powered document parsing, and automated email routing. The company was founded in 2018.
+
+Beta Inc provides cloud-based compliance software. It works primarily with financial institutions across North America. The product includes risk scoring, regulatory monitoring, and automated reporting tools. Customers report up to 30% faster audit preparation times.
