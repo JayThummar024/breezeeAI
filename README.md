@@ -90,22 +90,45 @@ Get your key from [console.anthropic.com](https://console.anthropic.com) → API
 
 ---
 
-## How the prompting works
+## Prompt design
 
-### `main.py` — tool use
+### System prompt (used in `main.py`)
 
-The tool definition acts as a strict JSON schema. When `tool_choice` is set to force a specific tool, Claude cannot reply in plain text — it has to return structured data that matches the schema exactly. Field types (`string` vs `array`) are enforced at the API level, not just checked after the fact.
+```
+You are a precise business analyst. Extract structured company profile
+information from the provided text.
 
-The system prompt sits alongside the schema and handles the interpretive side: how to handle ambiguous geography strings, what counts as a feature vs a value proposition, etc.
+Field instructions:
+- company_name: The company's formal name as stated.
+- industry: A concise category (e.g. "B2B SaaS", "Cloud Software", "FinTech").
+- target_customer: Primary customer type and segment in one sentence.
+- geography: Each region or market as a separate list item. Never merge multiple
+  regions into one string (e.g. return ["UK", "Europe"] not ["UK and Europe"]).
+- key_features: Each distinct product feature as a separate list item.
+- value_proposition: One sentence covering the core benefit, including any
+  quantified outcome stated in the text.
+
+Extract only what's in the text. Don't add outside knowledge.
+```
+
+Why each part is there:
+
+- **Role framing** ("precise business analyst") — steers Claude away from conversational responses and toward terse, analytical ones.
+- **Per-field instructions** — fields like `industry` and `value_proposition` are interpretive. Without a definition, the model gives inconsistently granular answers across different inputs.
+- **Explicit array split rule for `geography`** — without this, Claude often returns `["UK and Europe"]` as one string instead of two separate items. The instruction directly prevents that.
+- **"Don't add outside knowledge"** — stops Claude from filling in fields it can't find in the text with plausible-sounding guesses.
+- **No JSON format instructions in the prompt** — structure is handled entirely by the tool schema. Duplicating it in the prompt risks conflicting signals.
+
+The user message is just the raw input text — no extra wrapping needed since the system prompt sets all the context.
+
+### Few-shot prompt (used in `extract.py`)
+
+`extract.py` uses a different strategy: instead of a tool schema, the prompt shows Claude two complete input/output examples. Claude infers the expected format from the pattern. Simpler to set up, slightly less strict — the response is raw text so it gets run through markdown fence stripping and field checks before use.
 
 ```
 System prompt  →  tells Claude HOW to interpret each field
 Tool schema    →  tells the API WHAT shape the output must be
 ```
-
-### `extract.py` — few-shot prompt
-
-Two input/output examples are included directly in the prompt. Claude picks up the pattern and follows it for new inputs. This approach is simpler to set up but relies on the model following the examples consistently. A defensive `re.sub` strips markdown fences from the response before parsing, just in case.
 
 ---
 
@@ -118,11 +141,36 @@ Both scripts validate the output before printing it:
 
 ---
 
-## Things to consider for production
+## How it would work in production
 
-- **Rate limits** — the API has per-minute token and request caps. For bulk processing you'd want a queue with retries and backoff.
-- **Hallucination on sparse inputs** — if a field isn't in the text, Claude may invent something plausible. Worth adding `null`-able fields and logging cases where the model had to guess.
-- **Prompt injection** — input text from untrusted sources could try to override the instructions. Sanitise inputs and set a max character limit before sending to the API.
-- **Cost at scale** — prompt caching (already enabled in `main.py`) covers the static parts. For very high volume you'd also want to batch requests and use the async client.
-- **Schema changes are breaking changes** — if you add or rename a field, downstream consumers need to update too. Version your schemas.
-- **Key management** — `.env` is fine locally. In production use a proper secrets manager (AWS Secrets Manager, GCP Secret Manager, etc.) rather than files on disk.
+In production this becomes a small extraction service sitting between raw data ingestion and a structured database. The flow looks roughly like this:
+
+```
+Raw text input (CRM webhook, file upload, API call)
+        ↓
+Input validation + length check (reject anything malformed or too long)
+        ↓
+Claude API call with tool use schema
+        ↓
+Output validation (field presence, types)
+        ↓
+Store to database / pass to downstream service
+```
+
+A few things that would change vs the current script:
+
+**Async + queuing** — the script processes texts one at a time. In production you'd push jobs onto a queue (SQS, RabbitMQ, etc.) and use the async Claude client (`AsyncAnthropic`) to run multiple extractions concurrently within rate limits.
+
+**Prompt caching** — already enabled here. At volume it cuts input token costs by 80–90% for the static parts (system prompt + tool definition) since they're identical across every request.
+
+**Retries with backoff** — the API has per-minute rate limits. A production client wraps calls in exponential backoff, not a hard exit like `sys.exit(1)`.
+
+**Observability** — structured logging per request (input hash, model used, token counts, latency, cache hit/miss). Alerts on error rate spikes or unexpected field values.
+
+**Schema versioning** — the tool schema is a contract. Any field change is a breaking change for downstream consumers. Version it (`extract_company_profile_v2`) and migrate consumers explicitly rather than changing in place.
+
+**Secrets management** — `.env` is fine locally, but in production the API key lives in a secrets manager (AWS Secrets Manager, GCP Secret Manager, Vault) and is injected at runtime, never in files or environment variables on the host.
+
+**Hallucination handling** — if a field isn't mentioned in the input, Claude may invent a plausible value. Production pipelines should make fields optional (nullable), log confidence signals, or run a post-extraction check that cross-references values against the original text.
+
+**Prompt injection** — untrusted text inputs could attempt to override the system prompt. Sanitise inputs, enforce a max character limit, and monitor for outputs that don't match expected patterns.
