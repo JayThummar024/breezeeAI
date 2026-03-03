@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 
 import anthropic
 from dotenv import load_dotenv
@@ -23,6 +24,16 @@ INPUT_TEXTS = [
         "with financial institutions across North America. The product includes "
         "risk scoring, regulatory monitoring, and automated reporting tools. "
         "Customers report up to 30% faster audit preparation times.",
+    ),
+    (
+        "NovaMed Solutions",
+        "NovaMed Solutions is a healthtech startup based in Germany that offers "
+        "an AI-driven patient triage platform for hospitals and private clinics "
+        "across the DACH region. Their software reduces average patient wait times "
+        "by 35% by intelligently prioritising cases based on urgency. Core "
+        "capabilities include real-time symptom assessment, EHR integration, and "
+        "multilingual support for clinical staff. The company was founded in 2021 "
+        "and currently serves over 80 healthcare providers.",
     ),
 ]
 
@@ -97,15 +108,27 @@ Extract only what's in the text. Don't add outside knowledge."""
 
 
 def extract_company_profile(client: anthropic.Anthropic, text: str) -> dict:
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        temperature=0,
-        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        tools=[EXTRACTION_TOOL],
-        tool_choice={"type": "tool", "name": "extract_company_profile"},
-        messages=[{"role": "user", "content": text}],
-    )
+    max_retries = 4
+    delay = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                temperature=0,
+                system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                tools=[EXTRACTION_TOOL],
+                tool_choice={"type": "tool", "name": "extract_company_profile"},
+                messages=[{"role": "user", "content": text}],
+            )
+            break
+        except (anthropic.RateLimitError, anthropic.APIStatusError) as exc:
+            status = getattr(exc, "status_code", None)
+            if status not in (429, 529) or attempt == max_retries:
+                raise
+            print(f"  API returned {status}, retrying in {delay}s (attempt {attempt}/{max_retries})...")
+            time.sleep(delay)
+            delay *= 2
 
     if response.stop_reason == "max_tokens":
         print("  WARNING: response truncated — increase max_tokens if needed.")
