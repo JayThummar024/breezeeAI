@@ -90,6 +90,109 @@ Get your key from [console.anthropic.com](https://console.anthropic.com) → API
 
 ---
 
+## AI usage — how this was built
+
+I used Claude as a coding assistant throughout this project, mainly to understand the Anthropic SDK, figure out the right API pattern for structured output, and iterate on the prompt until the results were consistent.
+
+### Learning about prompt engineering
+
+I started by asking Claude to explain the difference between plain JSON prompting, few-shot examples, and tool use. The short version I got back was:
+
+> *"Plain prompting is asking nicely. Few-shot is showing examples. Tool use is handing the model a form it has to fill in — the API won't accept the response unless every field is present and correctly typed."*
+
+That framing made the decision easy — tool use was the right fit for this task because consistency matters more than flexibility.
+
+I also asked about why temperature matters for extraction tasks:
+
+> *"At temperature 1 the model has creative latitude — useful for writing, risky for data extraction. At temperature 0 it takes the most probable path through the output, which for a well-constrained schema means the same input will always produce the same output."*
+
+Set it to 0 immediately after that.
+
+---
+
+### Prompt iteration log
+
+**Attempt 1 — too vague, model did whatever it wanted**
+
+```
+Extract company information from this text and return JSON.
+
+{input_text}
+```
+
+Result: sometimes returned markdown, sometimes plain text, field names were inconsistent (`company` vs `company_name`, `features` vs `key_features`), and geography came back as a single string like `"UK and Europe"` every time.
+
+---
+
+**Attempt 2 — listed the fields, still got messy output**
+
+```
+Extract the following fields from the company description below and return them as JSON:
+- company name
+- industry
+- target customers
+- geography
+- key features
+- value proposition
+
+{input_text}
+```
+
+Result: field names were still inconsistent. The model sometimes used `"target customers"` with a space, sometimes `"targetCustomer"` in camelCase. Geography was still a single string. No type enforcement on arrays.
+
+---
+
+**Attempt 3 — specified exact key names and types, still geography problem**
+
+```
+Return a JSON object with these exact keys:
+company_name (string), industry (string), target_customer (string),
+geography (array of strings), key_features (array of strings),
+value_proposition (string)
+
+Text: {input_text}
+```
+
+Result: key names were now correct. But `geography` kept coming back as `["UK and Europe"]` — one item in the array instead of two. The model treated the phrase as a single unit because that's how it appeared in the source text.
+
+---
+
+**Attempt 4 — added the array split instruction, this fixed it**
+
+Added this line to the prompt:
+
+```
+- geography: Each region or market as a SEPARATE list item.
+  Never join multiple regions into one string.
+  Return ["UK", "Europe"] not ["UK and Europe"].
+```
+
+Result: geography was now split correctly across both inputs. This was the key fix — being explicit about *how* to handle the array, not just that it should be an array.
+
+---
+
+**Final approach — switched to tool use, dropped JSON instructions from prompt entirely**
+
+Once I understood tool use, I moved the structural rules (field names, types, required fields) into the `input_schema` of the tool definition and kept the system prompt focused purely on *interpretation* — what each field means, not what shape it should be. The API enforces the schema, so there's no risk of field name drift or type errors regardless of how the model phrases things internally.
+
+The system prompt went from ~200 words of mixed instructions to ~80 words of clean semantic guidance.
+
+---
+
+### Tool use — what it actually does
+
+When you pass `tool_choice: {"type": "tool", "name": "extract_company_profile"}`, the model is forced to return a structured tool call rather than a text response. The response object looks like:
+
+```python
+response.content[0].type    # "tool_use"
+response.content[0].name    # "extract_company_profile"
+response.content[0].input   # {"company_name": "Acme Ltd", "geography": ["UK", "Europe"], ...}
+```
+
+`response.content[0].input` is already a Python dict — no `json.loads()` needed, no markdown to strip. The API validates it against the schema before returning it, so if a required field is missing or the wrong type, the call fails rather than returning bad data.
+
+---
+
 ## Prompt design
 
 ### System prompt (used in `main.py`)
